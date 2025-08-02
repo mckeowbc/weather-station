@@ -2,7 +2,7 @@ services:
   mqtt:
     image: "eclipse-mosquitto:latest"
     volumes:
-      - ./config:/mosquitto/config
+      - ./mosquitto/config:/mosquitto/config
   metrics:
     build: "metrics-server"
     environment:
@@ -13,3 +13,7 @@ services:
         restart: true
     ports:
       - 8080:8080
+  prometheus:
+    image: "prom/prometheus"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
