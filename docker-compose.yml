@@ -1,0 +1,15 @@
+services:
+  mqtt:
+    image: "eclipse-mosquitto:latest"
+    volumes:
+      - ./config:/mosquitto/config
+  metrics:
+    build: "metrics-server"
+    environment:
+      - MQTT_TOPIC=weather
+    depends_on:
+      mqtt:
+        condition: service_started
+        restart: true
+    ports:
+      - 8080:8080
