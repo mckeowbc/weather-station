@@ -17,6 +17,9 @@ import (
 	"github.com/kelseyhightower/envconfig"
 )
 
+/*
+ * Config
+ */
 type Config struct {
 	MQTTServer string `envconfig:"MQTT_SERVER" default:"mqtt:1883"`
 	Topic      string `envconfig:"MQTT_TOPIC"`
@@ -24,6 +27,9 @@ type Config struct {
 	Password   string `envconfig:"MQTT_PASSWORD"`
 }
 
+/*
+ * MQTT Message Handlers
+ */
 var messagePubHandler mqtt.MessageHandler = func(client mqtt.Client, msg mqtt.Message) {
 	log.Printf("Received message: %s from topic: %s\n", msg.Payload(), msg.Topic())
 }
@@ -55,6 +61,20 @@ var connectLostHandler mqtt.ConnectionLostHandler = func(client mqtt.Client, err
 	log.Printf("Connect lost: %v", err)
 }
 
+/*
+ * Middleware
+ */
+
+func logger(next func(http.ResponseWriter, *http.Request)) func(http.ResponseWriter, *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("%s %s %s", r.RequestURI, r.RemoteAddr, r.UserAgent())
+		next(w, r)
+	}
+}
+
+/*
+ * Rest APP Types
+ */
 type WeatherMeasurement struct {
 	Temp     int `json:"temp"`
 	Humidity int `json:"humidity"`
@@ -87,7 +107,6 @@ func (app *App) GetCurrentConditions() WeatherMeasurement {
 }
 
 func (app *App) MetricsHandler(w http.ResponseWriter, r *http.Request) {
-	log.Printf("/metrics %s", r.UserAgent())
 	currentConditions := app.GetCurrentConditions()
 	fmt.Fprintf(w, "temperature %d\nhumidity %d\n", currentConditions.Temp, currentConditions.Humidity)
 }
@@ -131,7 +150,7 @@ func main() {
 		sub(client, conf.Topic, weatherPubHandler(app))
 	}
 
-	http.HandleFunc("/metrics", app.MetricsHandler)
+	http.HandleFunc("/metrics", logger(app.MetricsHandler))
 
 	log.Print("HTTP Listening on :8080")
 	err := http.ListenAndServe(":8080", nil)
