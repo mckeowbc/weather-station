@@ -27,10 +27,32 @@ type Config struct {
 	Password   string `envconfig:"MQTT_PASSWORD"`
 }
 
+const (
+	TEMP_HUMIDITY_MESSAGE = 56
+	WIND_RAIN_MESSAGE     = 49
+)
+
+type TempHumidityMeasurement struct {
+	Timestamp   string  `json:"time"`
+	Temp        float32 `json:"temperature_F"`
+	Humidity    float32 `json:"humidity"`
+	Battery     int     `json:"battery_ok"`
+	MessageType int     `json:"message_type"`
+}
+
+type WindRainMeasurement struct {
+	Timestamp     string  `json:"time"`
+	WindSpeed     float32 `json:"wind_avg_km_h"`
+	WindDirection float32 `json:"wind_dir_deg"`
+	RainInches    float32 `json:"rain_in"`
+	Battery       int     `json:"battery_ok"`
+	MessageType   int     `json:"message_type"`
+}
+
 /*
  * MQTT Message Handlers
  */
-var messagePubHandler mqtt.MessageHandler = func(client mqtt.Client, msg mqtt.Message) {
+func messagePubHandler(client mqtt.Client, msg mqtt.Message) {
 	log.Printf("Received message: %s from topic: %s\n", msg.Payload(), msg.Topic())
 }
 
@@ -38,26 +60,43 @@ func weatherPubHandler(app *App) mqtt.MessageHandler {
 	return func(client mqtt.Client, msg mqtt.Message) {
 		log.Printf("Received weather message: %s from topic: %s\n", msg.Payload(), msg.Topic())
 
-		var currentConditions WeatherMeasurement
-		if err := json.Unmarshal(msg.Payload(), &currentConditions); err != nil {
-			log.Printf("Could not decode weather data: %s", err)
+		var windRainMeasurement WindRainMeasurement
+
+		if err := json.Unmarshal(msg.Payload(), &windRainMeasurement); err != nil {
+			log.Printf("Could not decode json data: %s", err)
 			return
 		}
 
-		app.SetCurrentConditions(currentConditions)
+		if windRainMeasurement.MessageType == WIND_RAIN_MESSAGE {
+			app.SetWindRainConditions(windRainMeasurement)
+			return
+		}
+
+		var tempHumidityMeasurement TempHumidityMeasurement
+		if err := json.Unmarshal(msg.Payload(), &tempHumidityMeasurement); err != nil {
+			log.Printf("Could not decode json data: %s", err)
+			return
+		}
+
+		if tempHumidityMeasurement.MessageType == TEMP_HUMIDITY_MESSAGE {
+			app.SetTempHumidityConditions(tempHumidityMeasurement)
+			return
+		}
+
+		log.Printf("Unrecognized message type")
 	}
 }
 
-var connectHandler mqtt.OnConnectHandler = func(client mqtt.Client) {
+func connectHandler(client mqtt.Client) {
 	log.Println("Connected")
 }
 
-var connectAttemptHandler mqtt.ConnectionAttemptHandler = func(broker *url.URL, tlsCfg *tls.Config) *tls.Config {
+func connectAttemptHandler(broker *url.URL, tlsCfg *tls.Config) *tls.Config {
 	log.Printf("Attempting connection to %s", broker.Host)
 	return tlsCfg
 }
 
-var connectLostHandler mqtt.ConnectionLostHandler = func(client mqtt.Client, err error) {
+func connectLostHandler(client mqtt.Client, err error) {
 	log.Printf("Connect lost: %v", err)
 }
 
@@ -73,16 +112,28 @@ func logger(next func(http.ResponseWriter, *http.Request)) func(http.ResponseWri
 }
 
 /*
- * Rest APP Types
- */
-type WeatherMeasurement struct {
-	Temp     int `json:"temp"`
-	Humidity int `json:"humidity"`
+  - Rest APP Types
+  - {"time":"2025-08-03 21:51:44","model":"Acurite-5n1","message_type":56,
+    "id":1026,"channel":"C","sequence_num":0,"battery_ok":1,"wind_avg_km_h":0,
+    "temperature_F":69.1,"humidity":97,"mic":"CHECKSUM"}
+  - {"time":"2025-08-03 21:52:39","model":"Acurite-5n1","message_type":49,
+    "id":1026,"channel":"C","sequence_num":0,"battery_ok":1,"wind_avg_km_h":0,
+    "wind_dir_deg":157.5,"rain_in":0.23,"mic":"CHECKSUM"}
+*/
+
+type CurrentConditions struct {
+	Timestamp     string  `json:"time"`
+	Temp          float32 `json:"temperature_F"`
+	Humidity      float32 `json:"humidity"`
+	Battery       int     `json:"battery_ok"`
+	WindSpeed     float32 `json:"wind_avg_km_h"`
+	WindDirection float32 `json:"wind_dir_deg"`
+	RainInches    float32 `json:"rain_in"`
 }
 
 type App struct {
 	M                 *sync.Mutex
-	currentConditions WeatherMeasurement
+	currentConditions CurrentConditions
 }
 
 func NewApp() *App {
@@ -92,13 +143,27 @@ func NewApp() *App {
 	return &app
 }
 
-func (app *App) SetCurrentConditions(measurement WeatherMeasurement) {
+func (app *App) SetTempHumidityConditions(measurement TempHumidityMeasurement) {
 	app.M.Lock()
-	app.currentConditions = measurement
+	app.currentConditions.Timestamp = measurement.Timestamp
+	app.currentConditions.Temp = measurement.Temp
+	app.currentConditions.Humidity = measurement.Humidity
+	app.currentConditions.Battery = measurement.Battery
+	app.M.Unlock()
+
+}
+
+func (app *App) SetWindRainConditions(measurement WindRainMeasurement) {
+	app.M.Lock()
+	app.currentConditions.Timestamp = measurement.Timestamp
+	app.currentConditions.Battery = measurement.Battery
+	app.currentConditions.WindDirection = measurement.WindDirection
+	app.currentConditions.WindSpeed = measurement.WindSpeed
+	app.currentConditions.RainInches = measurement.RainInches
 	app.M.Unlock()
 }
 
-func (app *App) GetCurrentConditions() WeatherMeasurement {
+func (app *App) GetCurrentConditions() CurrentConditions {
 	app.M.Lock()
 	m := app.currentConditions
 	app.M.Unlock()
@@ -107,8 +172,20 @@ func (app *App) GetCurrentConditions() WeatherMeasurement {
 }
 
 func (app *App) MetricsHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain")
+	w.WriteHeader(http.StatusOK)
 	currentConditions := app.GetCurrentConditions()
-	fmt.Fprintf(w, "temperature %d\nhumidity %d\n", currentConditions.Temp, currentConditions.Humidity)
+	fmt.Fprintf(w, "temperature %f\n"+
+		"humidity %f\n"+
+		"rain_in %f\n"+
+		"wind_direction %f\n"+
+		"wind_speed %f\n",
+		currentConditions.Temp,
+		currentConditions.Humidity,
+		currentConditions.RainInches,
+		currentConditions.WindDirection,
+		currentConditions.WindSpeed,
+	)
 }
 
 func main() {
