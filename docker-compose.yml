@@ -3,10 +3,12 @@ services:
     image: "eclipse-mosquitto:latest"
     volumes:
       - ./mosquitto/config:/mosquitto/config
+    ports:
+      - 1883:1883
   metrics:
     build: "metrics-server"
     environment:
-      - MQTT_TOPIC=weather
+      - MQTT_TOPIC=rtl_433/+/events
     depends_on:
       mqtt:
         condition: service_started
@@ -17,3 +19,6 @@ services:
     image: "prom/prometheus"
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+volumes:
+  prometheus-data:
