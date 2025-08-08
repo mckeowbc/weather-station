@@ -16,7 +16,7 @@ metadata:
 spec:
   containers:
   - name: weather-metrics
-    image: registry.mckeownlab.diy/weather-metrics:v0.1
+    image: registry.mckeownlab.diy/prometheus-proxy:v0.2
     ports:
     - containerPort: 8080
     envFrom:

@@ -20,12 +20,22 @@ import (
 
 const URL = "https://weatherstation.wunderground.com/weatherstation/updateweatherstation.php"
 
-func handleWindRainMeasurement(m weathermetrics.WindRainMeasurement) map[string]string {
+func (a *App) handleWindRainMeasurement(m weathermetrics.WindRainMeasurement) map[string]string {
+	t := time.Now()
+
+	if t.Hour() == 0 && t.Minute() == 0 {
+		a.LastRainFall = -1.0
+	}
+
+	if a.LastRainFall < 0 {
+		a.LastRainFall = m.RainInches
+	}
+
 	w := map[string]string{
 		// "timestamp":   m.Timestamp,
-		"windspeedmph": fmt.Sprintf("%0.2f", m.WindSpeed*621371),
+		"windspeedmph": fmt.Sprintf("%0.2f", m.WindSpeed*0.62137119),
 		"wind_dir":     fmt.Sprintf("%0.2f", m.WindDirection),
-		"dailyrainin":  fmt.Sprintf("%0.2f", m.RainInches),
+		"dailyrainin":  fmt.Sprintf("%0.2f", m.RainInches-a.LastRainFall),
 	}
 
 	return w
@@ -41,7 +51,7 @@ func handleTempHumidityMeasurement(m weathermetrics.TempHumidityMeasurement) map
 	return w
 }
 
-func weatherPubHandler(c chan<- map[string]string) mqtt.MessageHandler {
+func (a *App) weatherPubHandler(c chan<- map[string]string) mqtt.MessageHandler {
 	return func(client mqtt.Client, msg mqtt.Message) {
 		log.Printf("Received weather message: %s from topic: %s\n", msg.Payload(), msg.Topic())
 
@@ -53,7 +63,7 @@ func weatherPubHandler(c chan<- map[string]string) mqtt.MessageHandler {
 		}
 
 		if windRainMeasurement.MessageType == weathermetrics.WIND_RAIN_MESSAGE {
-			c <- handleWindRainMeasurement(windRainMeasurement)
+			c <- a.handleWindRainMeasurement(windRainMeasurement)
 			return
 		}
 
@@ -70,6 +80,14 @@ func weatherPubHandler(c chan<- map[string]string) mqtt.MessageHandler {
 
 		log.Printf("ERROR: Unrecognized message type")
 	}
+}
+
+type App struct {
+	LastRainFall float32
+}
+
+func NewApp() App {
+	return App{LastRainFall: -1.0}
 }
 
 type PWSConfig struct {
@@ -115,7 +133,8 @@ func main() {
 	}
 
 	c := make(chan map[string]string)
-	sub(client, mqttConf.Topic, weatherPubHandler(c))
+	app := NewApp()
+	sub(client, mqttConf.Topic, app.weatherPubHandler(c))
 	defer close(client, mqttConf.Topic)
 
 	timer := time.After(time.Second * 60)

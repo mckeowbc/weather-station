@@ -1,0 +1,27 @@
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pws-publisher
+  namespace: weather-metrics
+  labels:
+    app: pws-publisher
+spec:
+  containers:
+  - name: pws-publisher
+    image: registry.mckeownlab.diy/pws-publisher:v0.3
+    envFrom:
+    - configMapRef:
+        name: metrics-config
+    env:
+    - name: PWS_ID
+      valueFrom:
+        secretKeyRef:
+          name: pws-secret
+          key: id
+    - name: PWS_KEY
+      valueFrom:
+        secretKeyRef:
+          name: pws-secret
+          key: key
+
