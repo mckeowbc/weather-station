@@ -72,32 +72,51 @@ func weatherPubHandler(c chan<- map[string]string) mqtt.MessageHandler {
 	}
 }
 
+type PWSConfig struct {
+	Key string
+	ID  string
+}
+
 func main() {
 	key := flag.String("key", "", "PWS Key")
 	id := flag.String("id", "", "PWS ID")
 	flag.Parse()
 
-	var conf weathermetrics.MQTTConfig
-	if err := envconfig.Process("weather", &conf); err != nil {
+	var mqttConf weathermetrics.MQTTConfig
+	if err := envconfig.Process("weather", &mqttConf); err != nil {
 		log.Fatal(err)
 	}
 
-	if len(conf.Username) > 0 && len(conf.Password) == 0 ||
-		len(conf.Username) == 0 && len(conf.Password) > 0 {
+	if len(mqttConf.Username) > 0 && len(mqttConf.Password) == 0 ||
+		len(mqttConf.Username) == 0 && len(mqttConf.Password) > 0 {
 		log.Fatal("Error: Must specify both username and password")
 	}
 
-	client, _ := weathermetrics.NewMQTTClient(conf)
+	if *key == "" && *id == "" {
+		var pwsConf PWSConfig
+		if err := envconfig.Process("pws", &pwsConf); err != nil {
+			log.Fatal(err)
+		}
 
-	log.Printf("Connecting to %s", fmt.Sprintf("tcp://%s", conf.MQTTServer))
+		*key = pwsConf.Key
+		*id = pwsConf.ID
+	}
+
+	if *key == "" && *id == "" {
+		log.Fatal("Must set PWS_KEY and PWS_ID")
+	}
+
+	client, _ := weathermetrics.NewMQTTClient(mqttConf)
+
+	log.Printf("Connecting to %s", fmt.Sprintf("tcp://%s", mqttConf.MQTTServer))
 
 	if token := client.Connect(); token.Wait() && token.Error() != nil {
 		panic(token.Error())
 	}
 
 	c := make(chan map[string]string)
-	sub(client, conf.Topic, weatherPubHandler(c))
-	defer close(client, conf.Topic)
+	sub(client, mqttConf.Topic, weatherPubHandler(c))
+	defer close(client, mqttConf.Topic)
 
 	timer := time.After(time.Second * 60)
 
