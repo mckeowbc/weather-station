@@ -1,103 +1,49 @@
 package main
 
 import (
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
-	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/kelseyhightower/envconfig"
+	weathermetrics "github.com/mckeowbc/weather-metrics"
 )
-
-/*
- * Config
- */
-type Config struct {
-	MQTTServer string `envconfig:"MQTT_SERVER" default:"mqtt:1883"`
-	Topic      string `envconfig:"MQTT_TOPIC"`
-	Username   string `envconfig:"MQTT_USERNAME"`
-	Password   string `envconfig:"MQTT_PASSWORD"`
-}
-
-const (
-	TEMP_HUMIDITY_MESSAGE = 56
-	WIND_RAIN_MESSAGE     = 49
-)
-
-type TempHumidityMeasurement struct {
-	Timestamp   string  `json:"time"`
-	Temp        float32 `json:"temperature_F"`
-	Humidity    float32 `json:"humidity"`
-	Battery     int     `json:"battery_ok"`
-	MessageType int     `json:"message_type"`
-}
-
-type WindRainMeasurement struct {
-	Timestamp     string  `json:"time"`
-	WindSpeed     float32 `json:"wind_avg_km_h"`
-	WindDirection float32 `json:"wind_dir_deg"`
-	RainInches    float32 `json:"rain_in"`
-	Battery       int     `json:"battery_ok"`
-	MessageType   int     `json:"message_type"`
-}
-
-/*
- * MQTT Message Handlers
- */
-func messagePubHandler(client mqtt.Client, msg mqtt.Message) {
-	log.Printf("Received message: %s from topic: %s\n", msg.Payload(), msg.Topic())
-}
 
 func weatherPubHandler(app *App) mqtt.MessageHandler {
 	return func(client mqtt.Client, msg mqtt.Message) {
 		log.Printf("Received weather message: %s from topic: %s\n", msg.Payload(), msg.Topic())
 
-		var windRainMeasurement WindRainMeasurement
+		var windRainMeasurement weathermetrics.WindRainMeasurement
 
 		if err := json.Unmarshal(msg.Payload(), &windRainMeasurement); err != nil {
 			log.Printf("Could not decode json data: %s", err)
 			return
 		}
 
-		if windRainMeasurement.MessageType == WIND_RAIN_MESSAGE {
+		if windRainMeasurement.MessageType == weathermetrics.WIND_RAIN_MESSAGE {
 			app.SetWindRainConditions(windRainMeasurement)
 			return
 		}
 
-		var tempHumidityMeasurement TempHumidityMeasurement
+		var tempHumidityMeasurement weathermetrics.TempHumidityMeasurement
 		if err := json.Unmarshal(msg.Payload(), &tempHumidityMeasurement); err != nil {
 			log.Printf("Could not decode json data: %s", err)
 			return
 		}
 
-		if tempHumidityMeasurement.MessageType == TEMP_HUMIDITY_MESSAGE {
+		if tempHumidityMeasurement.MessageType == weathermetrics.TEMP_HUMIDITY_MESSAGE {
 			app.SetTempHumidityConditions(tempHumidityMeasurement)
 			return
 		}
 
 		log.Printf("Unrecognized message type")
 	}
-}
-
-func connectHandler(client mqtt.Client) {
-	log.Println("Connected")
-}
-
-func connectAttemptHandler(broker *url.URL, tlsCfg *tls.Config) *tls.Config {
-	log.Printf("Attempting connection to %s", broker.Host)
-	return tlsCfg
-}
-
-func connectLostHandler(client mqtt.Client, err error) {
-	log.Printf("Connect lost: %v", err)
 }
 
 /*
@@ -111,29 +57,9 @@ func logger(next func(http.ResponseWriter, *http.Request)) func(http.ResponseWri
 	}
 }
 
-/*
-  - Rest APP Types
-  - {"time":"2025-08-03 21:51:44","model":"Acurite-5n1","message_type":56,
-    "id":1026,"channel":"C","sequence_num":0,"battery_ok":1,"wind_avg_km_h":0,
-    "temperature_F":69.1,"humidity":97,"mic":"CHECKSUM"}
-  - {"time":"2025-08-03 21:52:39","model":"Acurite-5n1","message_type":49,
-    "id":1026,"channel":"C","sequence_num":0,"battery_ok":1,"wind_avg_km_h":0,
-    "wind_dir_deg":157.5,"rain_in":0.23,"mic":"CHECKSUM"}
-*/
-
-type CurrentConditions struct {
-	Timestamp     string  `json:"time"`
-	Temp          float32 `json:"temperature_F"`
-	Humidity      float32 `json:"humidity"`
-	Battery       int     `json:"battery_ok"`
-	WindSpeed     float32 `json:"wind_avg_km_h"`
-	WindDirection float32 `json:"wind_dir_deg"`
-	RainInches    float32 `json:"rain_in"`
-}
-
 type App struct {
 	M                 *sync.Mutex
-	currentConditions CurrentConditions
+	currentConditions weathermetrics.CurrentConditions
 }
 
 func NewApp() *App {
@@ -143,7 +69,7 @@ func NewApp() *App {
 	return &app
 }
 
-func (app *App) SetTempHumidityConditions(measurement TempHumidityMeasurement) {
+func (app *App) SetTempHumidityConditions(measurement weathermetrics.TempHumidityMeasurement) {
 	app.M.Lock()
 	app.currentConditions.Timestamp = measurement.Timestamp
 	app.currentConditions.Temp = measurement.Temp
@@ -153,7 +79,7 @@ func (app *App) SetTempHumidityConditions(measurement TempHumidityMeasurement) {
 
 }
 
-func (app *App) SetWindRainConditions(measurement WindRainMeasurement) {
+func (app *App) SetWindRainConditions(measurement weathermetrics.WindRainMeasurement) {
 	app.M.Lock()
 	app.currentConditions.Timestamp = measurement.Timestamp
 	app.currentConditions.Battery = measurement.Battery
@@ -163,7 +89,7 @@ func (app *App) SetWindRainConditions(measurement WindRainMeasurement) {
 	app.M.Unlock()
 }
 
-func (app *App) GetCurrentConditions() CurrentConditions {
+func (app *App) GetCurrentConditions() weathermetrics.CurrentConditions {
 	app.M.Lock()
 	m := app.currentConditions
 	app.M.Unlock()
@@ -189,7 +115,7 @@ func (app *App) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	var conf Config
+	var conf weathermetrics.MQTTConfig
 	if err := envconfig.Process("weather", &conf); err != nil {
 		log.Fatal(err)
 	}
@@ -199,23 +125,9 @@ func main() {
 		log.Fatal("Error: Must specify both username and password")
 	}
 
+	client, _ := weathermetrics.NewMQTTClient(conf)
+
 	app := NewApp()
-
-	opts := mqtt.NewClientOptions()
-	opts.AddBroker(fmt.Sprintf("tcp://%s", conf.MQTTServer))
-	opts.SetClientID("weather-metrics")
-	opts.SetConnectRetry(true)
-	opts.SetConnectRetryInterval(time.Second * 2)
-	opts.SetConnectionAttemptHandler(connectAttemptHandler)
-	if len(conf.Username) > 0 {
-		opts.SetUsername(conf.Username)
-		opts.SetPassword(conf.Password)
-	}
-
-	opts.SetDefaultPublishHandler(messagePubHandler)
-	opts.OnConnect = connectHandler
-	opts.OnConnectionLost = connectLostHandler
-	client := mqtt.NewClient(opts)
 
 	log.Printf("Connecting to %s", fmt.Sprintf("tcp://%s", conf.MQTTServer))
 

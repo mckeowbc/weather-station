@@ -1,4 +1,4 @@
-module weather-metrics
+module github.com/mckeowbc/weather-metrics
 
 go 1.24.4
 
