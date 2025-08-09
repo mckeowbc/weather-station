@@ -20,8 +20,23 @@ import (
 
 const URL = "https://weatherstation.wunderground.com/weatherstation/updateweatherstation.php"
 
+type RTL433Message struct {
+	Timestamp *time.Time
+	Data      map[string]string
+}
+
+func (a *App) parseMessageTime(timestamp string) (*time.Time, error) {
+	t, err := time.ParseInLocation("2006-01-02 15:04:05", timestamp, a.TZ)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &t, nil
+}
+
 func (a *App) handleWindRainMeasurement(m weathermetrics.WindRainMeasurement) map[string]string {
-	t := time.Now()
+	t := time.Now().In(a.TZ)
 
 	if t.Hour() == 0 && t.Minute() == 0 {
 		a.LastRainFall = -1.0
@@ -31,27 +46,21 @@ func (a *App) handleWindRainMeasurement(m weathermetrics.WindRainMeasurement) ma
 		a.LastRainFall = m.RainInches
 	}
 
-	w := map[string]string{
-		// "timestamp":   m.Timestamp,
+	return map[string]string{
 		"windspeedmph": fmt.Sprintf("%0.2f", m.WindSpeed*0.62137119),
 		"wind_dir":     fmt.Sprintf("%0.2f", m.WindDirection),
 		"dailyrainin":  fmt.Sprintf("%0.2f", m.RainInches-a.LastRainFall),
 	}
-
-	return w
 }
 
 func handleTempHumidityMeasurement(m weathermetrics.TempHumidityMeasurement) map[string]string {
-	w := map[string]string{
-		// "timestamp": m.Timestamp,
+	return map[string]string{
 		"tempf":    fmt.Sprintf("%0.2f", m.Temp),
 		"humidity": fmt.Sprintf("%0.2f", m.Humidity),
 	}
-
-	return w
 }
 
-func (a *App) weatherPubHandler(c chan<- map[string]string) mqtt.MessageHandler {
+func (a *App) weatherPubHandler(c chan<- RTL433Message) mqtt.MessageHandler {
 	return func(client mqtt.Client, msg mqtt.Message) {
 		log.Printf("Received weather message: %s from topic: %s\n", msg.Payload(), msg.Topic())
 
@@ -62,8 +71,17 @@ func (a *App) weatherPubHandler(c chan<- map[string]string) mqtt.MessageHandler 
 			return
 		}
 
+		timestamp, err := a.parseMessageTime(windRainMeasurement.Timestamp)
+		if err != nil {
+			log.Printf("could not parse timestamp %s: %s", windRainMeasurement.Timestamp, err)
+			return
+		}
+
 		if windRainMeasurement.MessageType == weathermetrics.WIND_RAIN_MESSAGE {
-			c <- a.handleWindRainMeasurement(windRainMeasurement)
+			c <- RTL433Message{
+				Timestamp: timestamp,
+				Data:      a.handleWindRainMeasurement(windRainMeasurement),
+			}
 			return
 		}
 
@@ -74,7 +92,10 @@ func (a *App) weatherPubHandler(c chan<- map[string]string) mqtt.MessageHandler 
 		}
 
 		if tempHumidityMeasurement.MessageType == weathermetrics.TEMP_HUMIDITY_MESSAGE {
-			c <- handleTempHumidityMeasurement(tempHumidityMeasurement)
+			c <- RTL433Message{
+				Timestamp: timestamp,
+				Data:      handleTempHumidityMeasurement(tempHumidityMeasurement),
+			}
 			return
 		}
 
@@ -84,15 +105,22 @@ func (a *App) weatherPubHandler(c chan<- map[string]string) mqtt.MessageHandler 
 
 type App struct {
 	LastRainFall float32
+	TZ           *time.Location
 }
 
-func NewApp() App {
-	return App{LastRainFall: -1.0}
+func NewApp(tz string) (App, error) {
+	timezone, err := time.LoadLocation(tz)
+	if err != nil {
+		return App{}, err
+	}
+
+	return App{LastRainFall: -1.0, TZ: timezone}, nil
 }
 
 type PWSConfig struct {
 	Key string
 	ID  string
+	TZ  string `default:"America/New_York"`
 }
 
 func main() {
@@ -110,18 +138,27 @@ func main() {
 		log.Fatal("Error: Must specify both username and password")
 	}
 
-	if *key == "" && *id == "" {
-		var pwsConf PWSConfig
-		if err := envconfig.Process("pws", &pwsConf); err != nil {
-			log.Fatal(err)
-		}
+	var pwsConf PWSConfig
+	if err := envconfig.Process("pws", &pwsConf); err != nil {
+		log.Fatal(err)
+	}
 
+	if *key == "" {
 		*key = pwsConf.Key
+	}
+
+	if *id == "" {
 		*id = pwsConf.ID
 	}
 
-	if *key == "" && *id == "" {
+	if *key == "" || *id == "" {
 		log.Fatal("Must set PWS_KEY and PWS_ID")
+	}
+
+	app, err := NewApp(pwsConf.TZ)
+
+	if err != nil {
+		log.Fatal(err)
 	}
 
 	client, _ := weathermetrics.NewMQTTClient(mqttConf)
@@ -132,14 +169,13 @@ func main() {
 		panic(token.Error())
 	}
 
-	c := make(chan map[string]string)
-	app := NewApp()
+	c := make(chan RTL433Message)
 	sub(client, mqttConf.Topic, app.weatherPubHandler(c))
-	defer close(client, mqttConf.Topic)
+	defer MQTTClose(client, mqttConf.Topic)
 
 	timer := time.After(time.Second * 60)
 
-	data := make(map[string]string)
+	data := RTL433Message{Data: make(map[string]string)}
 
 	// Wait for interrupt signal to gracefully shutdown the subscriber
 	sigChan := make(chan os.Signal, 1)
@@ -149,20 +185,31 @@ outerloop:
 	for {
 		select {
 		case msg := <-c:
-
-			for key := range msg {
-				data[key] = msg[key]
+			data.Timestamp = msg.Timestamp
+			for key := range msg.Data {
+				data.Data[key] = msg.Data[key]
 			}
 
 		case <-timer:
-			resp, err := submitMeasurement(*id, *key, data)
-			defer resp.Body.Close()
-			if err != nil {
-				log.Println(err)
-			} else {
-				body, _ := io.ReadAll(resp.Body)
-				log.Printf("%d %s", resp.StatusCode, body)
+			d := time.Since(*data.Timestamp)
+
+			if d.Minutes() > 5 {
+				log.Printf("timestamp is more than 5 minutes out of date: %v",
+					*data.Timestamp,
+				)
+				continue outerloop
 			}
+
+			resp, err := submitMeasurement(*id, *key, data.Data)
+
+			if err != nil {
+				log.Print(err)
+				continue outerloop
+			}
+
+			defer resp.Body.Close()
+			body, _ := io.ReadAll(resp.Body)
+			log.Printf("%d %s", resp.StatusCode, body)
 			timer = time.After(time.Second * 60)
 		case <-sigChan:
 			break outerloop
@@ -185,6 +232,9 @@ func submitMeasurement(id, key string, values map[string]string) (*http.Response
 	queryParams := []string{}
 
 	for k := range mdict {
+		if k == "timestamp" {
+			continue
+		}
 		queryParams = append(queryParams, fmt.Sprintf("%s=%s", k, mdict[k]))
 	}
 
@@ -199,7 +249,7 @@ func sub(client mqtt.Client, topic string, handler mqtt.MessageHandler) {
 	log.Printf("Subscribed to topic: %s", topic)
 }
 
-func close(client mqtt.Client, topic string) {
+func MQTTClose(client mqtt.Client, topic string) {
 	client.Unsubscribe(topic)
 	client.Disconnect(250)
 }

@@ -9,7 +9,7 @@ metadata:
 spec:
   containers:
   - name: pws-publisher
-    image: registry.mckeownlab.diy/pws-publisher:v0.3
+    image: registry.mckeownlab.diy/pws-publisher:v0.5
     envFrom:
     - configMapRef:
         name: metrics-config

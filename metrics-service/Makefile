@@ -1,5 +1,5 @@
 
-VERSION=v0.3
+VERSION=v0.5
 REGISTRY=registry.mckeownlab.diy
 
 prometheus-docker:
